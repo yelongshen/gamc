@@ -48,6 +48,8 @@ def _retarget_worker(
     robot, actual_human_height, mocap_type,
     buffer_ms, rt_pin,
     xsens_host="0.0.0.0", xsens_port=9763, xsens_protocol="tcp",
+    pico_host="127.0.0.1", pico_port=5555, pico_topic="pose",
+    pico_root_height=0.793,
 ):
     """Worker process: mocap -> GMR retarget -> shared memory.
 
@@ -68,24 +70,41 @@ def _retarget_worker(
         except (OSError, PermissionError):
             pass
 
-    from gmr import GeneralMotionRetargeting as GMR
+    _mocap_type = (mocap_type or "").lower()
 
-    if (mocap_type or "").lower() == "xsens":
+    # PICO streams joint angles that are *already* retargeted to the G1, so
+    # this branch bypasses GMR/IK entirely (cf. onboard_deploy_wo_GMR, where
+    # the retargeting is likewise done off-box).
+    _is_pico = _mocap_type == "pico"
+
+    if _is_pico:
+        from deploy.pico.client import PicoClient
+        client = PicoClient(host=pico_host, port=pico_port, topic=pico_topic)
+        client.start_thread()
+        get_frame = lambda: client.get_frame_data(timeout=0.5)
+        retarget = None
+    elif _mocap_type == "xsens":
+        from gmr import GeneralMotionRetargeting as GMR
         from deploy.xsens.client import XsensClient
         client = XsensClient(
             host=xsens_host, port=xsens_port, protocol=xsens_protocol,
         )
         client.start_thread()
         get_frame = lambda: client.get_frame_data(timeout=0.5)
-        src_human = "fbx_xsens"
+        retarget = GMR(
+            src_human="fbx_xsens", tgt_robot=robot,
+            actual_human_height=actual_human_height,
+        )
     else:
+        from gmr import GeneralMotionRetargeting as GMR
         from noitom import NoitomClient
         client = NoitomClient()
         client.start_thread()
         get_frame = lambda: client.get_frame_data(timeout=True)
-        src_human = "fbx_noitom"
-
-    retarget = GMR(src_human=src_human, tgt_robot=robot, actual_human_height=actual_human_height)
+        retarget = GMR(
+            src_human="fbx_noitom", tgt_robot=robot,
+            actual_human_height=actual_human_height,
+        )
 
     qpos_last = None
     ema_alpha = 0.75
@@ -136,16 +155,34 @@ def _retarget_worker(
                 continue
 
             # Hand detection
-            l_open, l_dist = _detect_hand_open(frame, **_HAND_JOINTS["left"])
-            r_open, r_dist = _detect_hand_open(frame, **_HAND_JOINTS["right"])
-            hand_data = np.array([float(l_open), l_dist, float(r_open), r_dist], dtype=np.float32)
+            if _is_pico:
+                # PICO reports analog grip per hand instead of finger joints:
+                # treat "grip released" as an open hand.
+                l_grip = float(frame.left_grip)
+                r_grip = float(frame.right_grip)
+                hand_data = np.array(
+                    [float(l_grip < 0.5), l_grip, float(r_grip < 0.5), r_grip],
+                    dtype=np.float32,
+                )
+            else:
+                l_open, l_dist = _detect_hand_open(frame, **_HAND_JOINTS["left"])
+                r_open, r_dist = _detect_hand_open(frame, **_HAND_JOINTS["right"])
+                hand_data = np.array([float(l_open), l_dist, float(r_open), r_dist], dtype=np.float32)
             if not _use_jbuf:
                 with buf_hand.get_lock():
                     np.frombuffer(buf_hand.get_obj(), dtype=np.float32)[:] = hand_data
 
             # Retarget
             try:
-                qpos = retarget.retarget(frame)
+                if _is_pico:
+                    # Already G1-space: assemble qpos_full directly.
+                    # [root_pos 3 | root_quat 4 (wxyz) | dof 29]
+                    qpos = np.zeros(7 + frame.joint_pos.size, dtype=np.float32)
+                    qpos[2] = pico_root_height
+                    qpos[3:7] = frame.root_quat
+                    qpos[7:] = frame.joint_pos
+                else:
+                    qpos = retarget.retarget(frame)
             except Exception as e:
                 import traceback
                 print(f"[Retarget] error: {e}\n{traceback.format_exc()}")
@@ -197,6 +234,10 @@ def start_realtime_retarget(
     xsens_host: str = "0.0.0.0",
     xsens_port: int = 9763,
     xsens_protocol: str = "tcp",
+    pico_host: str = "127.0.0.1",
+    pico_port: int = 5555,
+    pico_topic: str = "pose",
+    pico_root_height: float = 0.793,
 ) -> tuple[SynchronizedArray, ...]:
     """Launch retarget worker and return shared buffers.
 
@@ -227,7 +268,8 @@ def start_realtime_retarget(
         target=_retarget_worker,
         args=(buf, buf_hand, ts, ready_evt, stop_evt,
               robot, actual_human_height, mocap_type, buffer_ms, rt_pin,
-              xsens_host, xsens_port, xsens_protocol),
+              xsens_host, xsens_port, xsens_protocol,
+              pico_host, pico_port, pico_topic, pico_root_height),
         daemon=True,
     )
     p.start()

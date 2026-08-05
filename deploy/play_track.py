@@ -414,6 +414,10 @@ def run_sim(args: "DeployArgs"):
                 xsens_host=args.xsens_host,
                 xsens_port=args.xsens_port,
                 xsens_protocol=args.xsens_protocol,
+                pico_host=args.pico_host,
+                pico_port=args.pico_port,
+                pico_topic=args.pico_topic,
+                pico_root_height=args.pico_root_height,
             )
             mocap_buffer = MocapBuffer(buf_mocap, ts_mocap)
             print("[Mocap] Retarget subprocess started.")
@@ -637,6 +641,10 @@ def run_real(args: "DeployArgs"):
                 xsens_host=args.xsens_host,
                 xsens_port=args.xsens_port,
                 xsens_protocol=args.xsens_protocol,
+                pico_host=args.pico_host,
+                pico_port=args.pico_port,
+                pico_topic=args.pico_topic,
+                pico_root_height=args.pico_root_height,
             )
             mocap_buffer = MocapBuffer(buf_mocap, ts_mocap)
             print("[Mocap] Retarget subprocess started.")
@@ -778,7 +786,7 @@ class DeployArgs:
 
     # Mocap
     no_mocap: bool = False
-    mocap_type: str = "pnlink"  # one of: pnlink | xsens
+    mocap_type: str = "pnlink"  # one of: pnlink | xsens | pico
     human_height: float = 1.7
     visualize_retarget: bool = True
     buffer_ms: float = 30.0
@@ -787,6 +795,12 @@ class DeployArgs:
     xsens_host: str = "0.0.0.0"      # local bind address for the receiver
     xsens_port: int = 9763           # default MVN Network Streamer port
     xsens_protocol: str = "tcp"      # "tcp" or "udp" - match MVN Studio setting
+
+    # PICO 4 Ultra SMPL stream (only used when --mocap-type pico).
+    pico_host: str = "127.0.0.1"     # IP of the machine running pico_manager
+    pico_port: int = 5555            # ZMQ PUB port
+    pico_topic: str = "pose"         # ZMQ topic prefix
+    pico_root_height: float = 0.793  # fixed pelvis height (no root translation in stream)
 
     # Real robot
     net: str = "enx6c1ff76e8ef5"
